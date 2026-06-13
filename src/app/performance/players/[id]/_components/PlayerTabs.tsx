@@ -6,6 +6,8 @@ import PlayerRadarChart, { type RadarDimension } from './RadarChart'
 import VEITrendChart, { type ChartPoint } from './VEITrendChart'
 import CompareModal, { type ComparePlayer } from './CompareModal'
 import ClipsTab, { type Clip } from './ClipsTab'
+import KPICards from './KPICards'
+import AttributeStats from './AttributeStats'
 import { RadialBarChart, RadialBar, ResponsiveContainer } from 'recharts'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -20,6 +22,17 @@ export type VeiMatchRow = {
   efficiencyScore: number | null
   impactScore: number | null
   isValid: boolean | null
+  // Attacking rates
+  shotvolRate: number | null
+  att3Rate: number | null
+  dribbleRate: number | null
+  goalRate: number | null
+  bigchanceRate: number | null
+  // Defensive / quality grades
+  hvdefRate: number | null
+  hvdefGrade: number | null
+  passGrade: number | null
+  carryGrade: number | null
 }
 
 export type EventStat = {
@@ -59,20 +72,24 @@ function formatDateShort(iso: string): string {
   })
 }
 
-function formatEventType(t: string) {
-  return t.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
-}
-
-function gradeColor(g: number): string {
-  if (g > 0) return '#16A34A'
-  if (g < 0) return '#DC2626'
-  return '#9CA3AF'
-}
 
 function ordinal(n: number): string {
   const s = ['th', 'st', 'nd', 'rd']
   const v = n % 100
   return n + (s[(v - 20) % 10] || s[v] || s[0])
+}
+
+function stdDev(arr: number[]): number {
+  if (arr.length < 2) return 0
+  const m = arr.reduce((a, b) => a + b, 0) / arr.length
+  return Math.sqrt(arr.reduce((sum, v) => sum + (v - m) ** 2, 0) / arr.length)
+}
+
+function metricColor(value: number | null, avg: number | null): string {
+  if (value === null || avg === null) return '#6B7280'
+  if (value > avg) return '#16a34a'
+  if (value < avg) return '#dc2626'
+  return '#6B7280'
 }
 
 // ─── Radial gauge ─────────────────────────────────────────────────────────────
@@ -125,6 +142,7 @@ export default function PlayerTabs({
   peers,
   currentPlayer,
   clips,
+  squadAvg,
 }: {
   matchRows: VeiMatchRow[]
   eventStats: EventStat[]
@@ -138,6 +156,7 @@ export default function PlayerTabs({
   peers: ComparePlayer[]
   currentPlayer: ComparePlayer
   clips: Clip[]
+  squadAvg: { vei: number | null; volume: number | null; efficiency: number | null; impact: number | null }
 }) {
   const [tab, setTab] = useState<'overview' | 'attributes' | 'performance' | 'clips'>('overview')
   const [showCompare, setShowCompare] = useState(false)
@@ -175,10 +194,33 @@ export default function PlayerTabs({
     }))
 
   // Key event stats
-  const shotStat = eventStats.find(e => e.eventType === 'shot')
-  const passStat = eventStats.find(e => e.eventType === 'pass')
-  const defStat  = eventStats.find(e => e.eventType === 'defensive_action')
   const totalGoals = eventStats.reduce((sum, e) => sum + e.goals, 0)
+
+  // Performance tab derived values
+  const validVeis = validRows.map(r => r.veiIndex as number)
+  const last3Valid = validRows.slice(0, 3)
+  const last3Avg = last3Valid.length > 0 ? last3Valid.reduce((s, r) => s + (r.veiIndex ?? 0), 0) / last3Valid.length : null
+  const bestMatchRow = validRows.length > 0 ? validRows.reduce((b, r) => ((r.veiIndex ?? 0) > (b.veiIndex ?? 0) ? r : b), validRows[0]) : null
+  const consistency = validVeis.length >= 2 ? Math.max(0, 10 - stdDev(validVeis)) : null
+
+  let seasonArrow: { sym: string; color: string } | null = null
+  if (avgVei !== null && last3Avg !== null && last3Valid.length >= 3) {
+    if (last3Avg > avgVei) seasonArrow = { sym: '↑', color: '#16a34a' }
+    else if (last3Avg < avgVei) seasonArrow = { sym: '↓', color: '#dc2626' }
+  }
+
+  const avgVolume = (() => {
+    const vals = validRows.map(r => r.volumeScore).filter((v): v is number => v !== null)
+    return vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : null
+  })()
+  const avgEfficiency = (() => {
+    const vals = validRows.map(r => r.efficiencyScore).filter((v): v is number => v !== null)
+    return vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : null
+  })()
+  const avgImpact = (() => {
+    const vals = validRows.map(r => r.impactScore).filter((v): v is number => v !== null)
+    return vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : null
+  })()
 
   return (
     <>
@@ -248,66 +290,8 @@ export default function PlayerTabs({
             )}
           </div>
 
-          {/* 4 key stats */}
-          {(() => {
-            // Derive the two most recent valid matches from matchRows (already newest-first)
-            const recentTwo = matchRows
-              .filter(r => r.isValid && r.veiIndex !== null)
-              .slice(0, 2)
-            const cur = recentTwo[0] ?? null
-            const prv = recentTwo[1] ?? null
-            const hasDelta = !!(cur && prv)
-
-            // matchRows carries VEI sub-scores but not raw event counts.
-            // Per-match goals/shots/tackles/pass% aren't available here,
-            // so those deltas stay null and render as —.
-            const deltas = {
-              goals:   null as number | null,
-              shots:   null as number | null,
-              tackles: null as number | null,
-              passPct: hasDelta && cur!.efficiencyScore !== null && prv!.efficiencyScore !== null
-                ? Math.round((cur!.efficiencyScore - prv!.efficiencyScore) * 10)
-                : null,
-            }
-
-            function DeltaBadge({ delta }: { delta: number | null }) {
-              if (delta === null) return <span style={{ fontSize: '11px', color: '#9CA3AF', fontWeight: 500 }}>—</span>
-              if (delta === 0)    return <span style={{ fontSize: '11px', color: '#9CA3AF', fontWeight: 500 }}>0</span>
-              const positive = delta > 0
-              return (
-                <span style={{
-                  fontSize: '11px', fontWeight: 600,
-                  color: positive ? '#16A34A' : '#DC2626',
-                }}>
-                  {positive ? '+' : ''}{delta}
-                </span>
-              )
-            }
-
-            return (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px', marginBottom: '16px' }}>
-                {[
-                  { value: String(totalGoals), label: 'Goals', sub: 'all matches', delta: deltas.goals,
-                    extra: positionGroupRank !== null
-                      ? <div style={{ marginTop: '4px', fontSize: '10px', background: '#F3F4F6', borderRadius: '9999px', padding: '1px 6px', display: 'inline-block', color: '#6B7280' }}>{ordinal(positionGroupRank)} of {positionGroupTotal}</div>
-                      : null },
-                  { value: String(shotStat?.attempts ?? 0), label: 'Shots', sub: `${Math.round(shotStat?.completionRate ?? 0)}% on target`, delta: deltas.shots, extra: null },
-                  { value: String(defStat?.attempts ?? 0),  label: 'Tackles', sub: `${Math.round(defStat?.completionRate ?? 0)}% won`, delta: deltas.tackles, extra: null },
-                  { value: passStat ? `${Math.round(passStat.completionRate)}%` : '—', label: 'Pass %', sub: `${passStat?.attempts ?? 0} attempts`, delta: deltas.passPct, extra: null },
-                ].map(({ value, label, sub, delta, extra }) => (
-                  <div key={label} className="stat-card" style={{ border: '1px solid #E5E7EB', borderRadius: '10px', padding: '16px', textAlign: 'center' }}>
-                    <div style={{ fontSize: '26px', fontWeight: 700, color: '#111111', lineHeight: 1, marginBottom: '4px' }}>{value}</div>
-                    <div style={{ fontSize: '11px', fontWeight: 600, color: '#111111', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{label}</div>
-                    <div style={{ fontSize: '11px', color: '#9CA3AF', marginTop: '2px' }}>{sub}</div>
-                    <div style={{ marginTop: '6px' }}>
-                      <DeltaBadge delta={delta} />
-                    </div>
-                    {extra}
-                  </div>
-                ))}
-              </div>
-            )
-          })()}
+          {/* KPI sparkline cards */}
+          <KPICards matchRows={matchRows} />
 
         </div>
       )}
@@ -342,60 +326,10 @@ export default function PlayerTabs({
             )}
           </div>
 
-          {/* Match statistics grid */}
+          {/* Attacking / Defensive KPI sparklines */}
           <div style={{ borderTop: '1px solid #E5E7EB', paddingTop: '24px' }}>
-            <div style={{ fontSize: '12px', fontWeight: 600, color: '#9CA3AF', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '16px' }}>
-              Match Statistics
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
-              {[
-                { label: 'Shots', value: shotStat?.attempts ?? 0 },
-                { label: 'On Target', value: shotStat ? Math.round((shotStat.completionRate / 100) * shotStat.attempts) : 0 },
-                { label: 'Shot Acc.', value: shotStat ? `${Math.round(shotStat.completionRate)}%` : '—' },
-                { label: 'Key Passes', value: passStat ? Math.round((passStat.completionRate / 100) * passStat.attempts) : 0 },
-                { label: 'Dribbles', value: eventStats.find(e => e.eventType === 'dribble')?.attempts ?? 0 },
-                { label: 'Duels Won', value: defStat ? Math.round((defStat.completionRate / 100) * defStat.attempts) : 0 },
-              ].map(({ label, value }) => (
-                <div key={label} style={{ border: '1px solid #E5E7EB', borderRadius: '8px', padding: '14px 16px' }}>
-                  <div style={{ fontSize: '20px', fontWeight: 700, color: '#111111', lineHeight: 1, marginBottom: '4px' }}>{value}</div>
-                  <div style={{ fontSize: '11px', color: '#9CA3AF', fontWeight: 500 }}>{label}</div>
-                </div>
-              ))}
-            </div>
+            <AttributeStats matchRows={matchRows} />
           </div>
-
-          {/* Event quality table */}
-          {eventStats.length > 0 && (
-            <div style={{ marginTop: '24px' }}>
-              <div style={{ fontSize: '12px', fontWeight: 600, color: '#9CA3AF', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '12px' }}>
-                Event Grades
-              </div>
-              <div style={{ border: '1px solid #E5E7EB', borderRadius: '10px', overflow: 'hidden' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 72px 90px 100px', background: '#F9FAFB', borderBottom: '1px solid #E5E7EB' }}>
-                  {['Event Type', 'Attempts', 'Mean Grade', 'Completion'].map(h => (
-                    <div key={h} style={{ padding: '8px 14px', fontSize: '11px', fontWeight: 600, color: '#9CA3AF', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{h}</div>
-                  ))}
-                </div>
-                {eventStats.map((es, i) => (
-                  <div key={es.eventType} style={{ display: 'grid', gridTemplateColumns: '1fr 72px 90px 100px', borderBottom: i < eventStats.length - 1 ? '1px solid #F3F4F6' : 'none' }}>
-                    <div style={{ padding: '10px 14px', fontSize: '13px', fontWeight: 500, color: '#111111' }}>{formatEventType(es.eventType)}</div>
-                    <div style={{ padding: '10px 14px', fontSize: '13px', color: '#6B7280' }}>{es.attempts}</div>
-                    <div style={{ padding: '10px 14px', fontSize: '13px', fontWeight: 600, color: gradeColor(es.meanGrade) }}>
-                      {es.meanGrade > 0 ? '+' : ''}{es.meanGrade.toFixed(2)}
-                    </div>
-                    <div style={{ padding: '10px 14px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <div style={{ flex: 1, height: '4px', background: '#F3F4F6', borderRadius: '9999px', overflow: 'hidden' }}>
-                          <div style={{ width: `${es.completionRate}%`, height: '100%', background: '#111111', borderRadius: '9999px' }} />
-                        </div>
-                        <span style={{ fontSize: '11px', color: '#6B7280', minWidth: '28px' }}>{Math.round(es.completionRate)}%</span>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
       )}
 
@@ -411,17 +345,32 @@ export default function PlayerTabs({
 
           {/* Stats row */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px', marginBottom: '24px' }}>
-            {[
-              { value: String(totalMatches), label: 'Played' },
-              { value: String(validRows.length), label: 'Valid' },
-              { value: String(totalGoals), label: 'Goals' },
-              { value: String(eventStats.find(e => e.eventType === 'shot')?.attempts ?? 0), label: 'Shots' },
-            ].map(({ value, label }) => (
-              <div key={label} style={{ border: '1px solid #E5E7EB', borderRadius: '10px', padding: '14px', textAlign: 'center' }}>
-                <div style={{ fontSize: '24px', fontWeight: 700, color: '#111111', lineHeight: 1, marginBottom: '4px' }}>{value}</div>
-                <div style={{ fontSize: '11px', color: '#9CA3AF', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{label}</div>
+            {/* Season VEI */}
+            <div className="stat-card" style={{ border: '1px solid #E5E7EB', borderRadius: '10px', padding: '14px', textAlign: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'center', gap: '4px', marginBottom: '4px' }}>
+                <span style={{ fontSize: '24px', fontWeight: 700, color: '#111111', lineHeight: 1 }}>{avgVei !== null ? avgVei.toFixed(1) : '—'}</span>
+                {seasonArrow && <span style={{ fontSize: '15px', fontWeight: 700, color: seasonArrow.color, lineHeight: 1 }}>{seasonArrow.sym}</span>}
               </div>
-            ))}
+              <div style={{ fontSize: '11px', color: '#9CA3AF', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Season VEI</div>
+            </div>
+            {/* Best Match */}
+            <div className="stat-card" style={{ border: '1px solid #E5E7EB', borderRadius: '10px', padding: '14px', textAlign: 'center' }}>
+              <div style={{ fontSize: '24px', fontWeight: 700, color: '#111111', lineHeight: 1, marginBottom: '2px' }}>{bestMatchRow ? (bestMatchRow.veiIndex ?? 0).toFixed(1) : '—'}</div>
+              {bestMatchRow && <div style={{ fontSize: '11px', color: '#6B7280', marginBottom: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bestMatchRow.opponent}</div>}
+              <div style={{ fontSize: '11px', color: '#9CA3AF', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Best Match</div>
+            </div>
+            {/* Consistency */}
+            <div className="stat-card" style={{ border: '1px solid #E5E7EB', borderRadius: '10px', padding: '14px', textAlign: 'center' }}>
+              <div style={{ fontSize: '24px', fontWeight: 700, color: '#111111', lineHeight: 1, marginBottom: '2px' }}>{consistency !== null ? consistency.toFixed(1) : '—'}</div>
+              <div style={{ fontSize: '11px', color: '#6B7280', marginBottom: '2px' }}>out of 10</div>
+              <div style={{ fontSize: '11px', color: '#9CA3AF', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Consistency</div>
+            </div>
+            {/* Position Rank */}
+            <div className="stat-card" style={{ border: '1px solid #E5E7EB', borderRadius: '10px', padding: '14px', textAlign: 'center' }}>
+              <div style={{ fontSize: '24px', fontWeight: 700, color: '#111111', lineHeight: 1, marginBottom: '2px' }}>{positionGroupRank !== null ? ordinal(positionGroupRank) : '—'}</div>
+              {positionGroupTotal > 0 && <div style={{ fontSize: '11px', color: '#6B7280', marginBottom: '2px' }}>of {positionGroupTotal}</div>}
+              <div style={{ fontSize: '11px', color: '#9CA3AF', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Position Rank</div>
+            </div>
           </div>
 
           {/* VEI trend line chart */}
@@ -434,8 +383,8 @@ export default function PlayerTabs({
           {/* Match log */}
           {matchRows.length > 0 && (
             <div style={{ marginTop: '20px', border: '1px solid #E5E7EB', borderRadius: '10px', overflow: 'hidden' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '110px 1fr 90px 70px 70px', background: '#F9FAFB', borderBottom: '1px solid #E5E7EB' }}>
-                {['Date', 'Opponent', 'Age Grp', 'VEI', 'Valid'].map(h => (
+              <div style={{ display: 'grid', gridTemplateColumns: '100px 1fr 75px 55px 65px 75px 60px 95px', background: '#F9FAFB', borderBottom: '1px solid #E5E7EB' }}>
+                {['Date', 'Opponent', 'Age Grp', 'VEI', 'Volume', 'Efficiency', 'Impact', 'Status'].map(h => (
                   <div key={h} style={{ padding: '9px 12px', fontSize: '11px', fontWeight: 600, color: '#9CA3AF', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{h}</div>
                 ))}
               </div>
@@ -443,17 +392,33 @@ export default function PlayerTabs({
                 <Link
                   key={row.matchId}
                   href={`/performance/matches/${row.matchId}`}
-                  style={{ display: 'grid', gridTemplateColumns: '110px 1fr 90px 70px 70px', textDecoration: 'none', borderBottom: i < matchRows.length - 1 ? '1px solid #F3F4F6' : 'none', opacity: row.isValid ? 1 : 0.5 }}
+                  style={{ display: 'grid', gridTemplateColumns: '100px 1fr 75px 55px 65px 75px 60px 95px', textDecoration: 'none', borderBottom: i < matchRows.length - 1 ? '1px solid #F3F4F6' : 'none', opacity: row.isValid ? 1 : 0.5 }}
                 >
                   <div style={{ padding: '11px 12px', fontSize: '12px', color: '#6B7280' }}>{formatDate(row.date)}</div>
                   <div style={{ padding: '11px 12px', fontSize: '13px', fontWeight: 500, color: '#111111', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.opponent}</div>
                   <div style={{ padding: '11px 12px', fontSize: '12px', color: '#6B7280' }}>{row.ageGroup ?? '—'}</div>
                   <div style={{ padding: '11px 12px', fontSize: '14px', fontWeight: 700, color: '#111111' }}>{fmt1(row.veiIndex)}</div>
-                  <div style={{ padding: '11px 12px', fontSize: '12px', fontWeight: 600, color: row.isValid ? '#16A34A' : '#EF4444' }}>
-                    {row.isValid ? '✓' : '✗'}
+                  <div style={{ padding: '11px 12px', fontSize: '13px', fontWeight: 600, color: metricColor(row.volumeScore, avgVolume) }}>{fmt1(row.volumeScore)}</div>
+                  <div style={{ padding: '11px 12px', fontSize: '13px', fontWeight: 600, color: metricColor(row.efficiencyScore, avgEfficiency) }}>{fmt1(row.efficiencyScore)}</div>
+                  <div style={{ padding: '11px 12px', fontSize: '13px', fontWeight: 600, color: metricColor(row.impactScore, avgImpact) }}>{fmt1(row.impactScore)}</div>
+                  <div style={{ padding: '11px 12px', fontSize: '12px', fontWeight: 600, color: row.isValid ? '#16a34a' : '#d97706' }}>
+                    <span title="Complete means enough event data exists to calculate a reliable VEI score">
+                      {row.isValid ? 'Complete' : 'Incomplete'}
+                    </span>
                   </div>
                 </Link>
               ))}
+              {/* Squad Avg row */}
+              <div style={{ display: 'grid', gridTemplateColumns: '100px 1fr 75px 55px 65px 75px 60px 95px', background: '#F9FAFB', borderTop: '1px solid #E5E7EB' }}>
+                <div style={{ padding: '10px 12px', fontSize: '11px', color: '#9CA3AF' }} />
+                <div style={{ padding: '10px 12px', fontSize: '12px', fontWeight: 600, color: '#9CA3AF', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Squad Avg</div>
+                <div style={{ padding: '10px 12px' }} />
+                <div style={{ padding: '10px 12px', fontSize: '13px', fontWeight: 600, color: '#6B7280' }}>{squadAvg.vei !== null ? squadAvg.vei.toFixed(1) : '—'}</div>
+                <div style={{ padding: '10px 12px', fontSize: '13px', fontWeight: 600, color: '#6B7280' }}>{squadAvg.volume !== null ? squadAvg.volume.toFixed(1) : '—'}</div>
+                <div style={{ padding: '10px 12px', fontSize: '13px', fontWeight: 600, color: '#6B7280' }}>{squadAvg.efficiency !== null ? squadAvg.efficiency.toFixed(1) : '—'}</div>
+                <div style={{ padding: '10px 12px', fontSize: '13px', fontWeight: 600, color: '#6B7280' }}>{squadAvg.impact !== null ? squadAvg.impact.toFixed(1) : '—'}</div>
+                <div style={{ padding: '10px 12px' }} />
+              </div>
             </div>
           )}
         </div>

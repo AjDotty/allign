@@ -95,7 +95,7 @@ export default async function PlayerProfilePage({
   // Fetch all player_match_vei rows for this player joined with matches
   const { data: veiData } = await supabase
     .from('player_match_vei')
-    .select('match_id, vei_index, volume_score, efficiency_score, impact_score, is_valid, matches(id, opponent, date, age_group)')
+    .select('match_id, vei_index, volume_score, efficiency_score, impact_score, is_valid, shotvol_rate, att3_rate, dribble_rate, goal_rate, bigchance_rate, hvdef_rate, hvdef_grade, pass_grade, carry_grade, matches(id, opponent, date, age_group)')
     .eq('player_id', playerId)
 
   // Fetch match_events for this player (include match_id for per-match deltas)
@@ -118,20 +118,10 @@ export default async function PlayerProfilePage({
     .select('player_id, finisher, creator, progressor, disruptor, security, matches_included, players(id, name, position_group, shirt_number)')
     .eq('organisation_id', organisationId)
 
-  // Fetch all valid VEI rows for position group ranking
-  const { data: posGroupVeiData } = player.position_group
-    ? await supabase
-        .from('player_match_vei')
-        .select('player_id, vei_index')
-        .eq('organisation_id', organisationId)
-        .eq('position_group', player.position_group)
-        .eq('is_valid', true)
-    : { data: null }
-
-  // Fetch org-wide avg VEI per player for leaderboard
+  // Fetch org-wide avg VEI per player for leaderboard (also used for position group ranking)
   const { data: orgVeiData } = await supabase
     .from('player_match_vei')
-    .select('player_id, vei_index, players(name, position_group)')
+    .select('player_id, vei_index, volume_score, efficiency_score, impact_score, players(name, position_group)')
     .eq('organisation_id', organisationId)
     .eq('is_valid', true)
 
@@ -151,6 +141,15 @@ export default async function PlayerProfilePage({
       efficiencyScore: row.efficiency_score,
       impactScore: row.impact_score,
       isValid: row.is_valid,
+      shotvolRate: row.shotvol_rate ?? null,
+      att3Rate: row.att3_rate ?? null,
+      dribbleRate: row.dribble_rate ?? null,
+      goalRate: row.goal_rate ?? null,
+      bigchanceRate: row.bigchance_rate ?? null,
+      hvdefRate: row.hvdef_rate ?? null,
+      hvdefGrade: row.hvdef_grade ?? null,
+      passGrade: row.pass_grade ?? null,
+      carryGrade: row.carry_grade ?? null,
     }]
   }).sort((a, b) => b.date.localeCompare(a.date))
 
@@ -192,20 +191,6 @@ export default async function PlayerProfilePage({
       }
     : null
 
-  // ── Position group ranking ────────────────────────────────────────────────
-
-  const posGroupAvgs: Record<string, number[]> = {}
-  for (const row of posGroupVeiData ?? []) {
-    if (!posGroupAvgs[row.player_id]) posGroupAvgs[row.player_id] = []
-    posGroupAvgs[row.player_id].push(row.vei_index ?? 0)
-  }
-  const posGroupRanked = Object.entries(posGroupAvgs)
-    .map(([pid, vals]) => ({ playerId: pid, avg: mean(vals) }))
-    .sort((a, b) => b.avg - a.avg)
-
-  const positionGroupRank = posGroupRanked.findIndex(r => r.playerId === playerId) + 1 || null
-  const positionGroupTotal = posGroupRanked.length
-
   // ── Events ────────────────────────────────────────────────────────────────
 
   const eventGroups: Record<string, { grades: number[]; completed: number; total: number; goals: number }> = {}
@@ -245,6 +230,29 @@ export default async function PlayerProfilePage({
     .map(([pid, { veis, name, posGroup }]) => ({ playerId: pid, playerName: name, avgVei: mean(veis), positionGroup: posGroup }))
     .sort((a, b) => b.avgVei - a.avgVei)
     .slice(0, 10)
+
+  // ── Squad ranking (overall, by avg VEI) ──────────────────────────────────
+  const squadRanked = Object.entries(leaderAvgs)
+    .map(([pid, { veis }]) => ({ playerId: pid, avg: mean(veis) }))
+    .sort((a, b) => b.avg - a.avg)
+
+  const positionGroupRank = squadRanked.findIndex(r => r.playerId === playerId) + 1 || null
+  const positionGroupTotal = squadRanked.length
+
+  // ── Squad averages (for squad avg row in match table) ─────────────────────
+  const squadAvg = (() => {
+    const rows = orgVeiData ?? []
+    const veis = rows.map(r => r.vei_index).filter((v): v is number => v !== null)
+    const vols = rows.map(r => r.volume_score).filter((v): v is number => v !== null)
+    const effs = rows.map(r => r.efficiency_score).filter((v): v is number => v !== null)
+    const imps = rows.map(r => r.impact_score).filter((v): v is number => v !== null)
+    return {
+      vei:        veis.length > 0 ? veis.reduce((a, b) => a + b, 0) / veis.length : null,
+      volume:     vols.length > 0 ? vols.reduce((a, b) => a + b, 0) / vols.length : null,
+      efficiency: effs.length > 0 ? effs.reduce((a, b) => a + b, 0) / effs.length : null,
+      impact:     imps.length > 0 ? imps.reduce((a, b) => a + b, 0) / imps.length : null,
+    }
+  })()
 
   // ── Badges ────────────────────────────────────────────────────────────────
 
@@ -449,6 +457,7 @@ export default async function PlayerProfilePage({
                 peers={peers}
                 currentPlayer={currentPlayerCompare}
                 clips={clips}
+                squadAvg={squadAvg}
               />
             </div>
           </div>
