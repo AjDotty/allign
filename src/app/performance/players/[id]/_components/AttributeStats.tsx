@@ -2,7 +2,6 @@
 
 import { useState } from 'react'
 import { AreaChart, Area, Tooltip } from 'recharts'
-import type { TooltipProps } from 'recharts'
 import type { VeiMatchRow } from './PlayerTabs'
 
 type SparkPoint = { value: number; opponent: string }
@@ -12,7 +11,7 @@ function mean(arr: number[]): number {
   return arr.reduce((a, b) => a + b, 0) / arr.length
 }
 
-function SparkTooltip({ active, payload }: TooltipProps<number, string>) {
+function SparkTooltip({ active, payload }: { active?: boolean; payload?: Array<{ payload: SparkPoint; value: number }> }) {
   if (!active || !payload?.length) return null
   const { value, opponent } = payload[0].payload as SparkPoint
   return (
