@@ -8,7 +8,7 @@ import baseTemplate from '@/lib/metrica/base-template.json'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const AGE_GROUPS = ['U9', 'U10', 'U11', 'U12', 'U13', 'U14', 'U15', 'U16']
+const AGE_GROUPS = ['U9', 'U10', 'U11', 'U12', 'U13', 'U14', 'U15', 'U16', 'Senior']
 const VENUE_TYPES = ['Home', 'Away', 'Neutral']
 const POSITIONS = ['GK', 'DEF', 'MID', 'ATT']
 
